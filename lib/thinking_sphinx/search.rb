@@ -465,7 +465,7 @@ module ThinkingSphinx
       elsif options[:only]
         compose_only_results
       else
-        replace instances_from_matches
+        replace options[:instances_from_attributes] ? instances_from_attributes : instances_from_matches
         add_excerpter
         add_sphinx_attributes
         add_matching_fields if client.rank_mode == :fieldmask
@@ -952,6 +952,76 @@ module ThinkingSphinx
     # Group results by class and call #find(:all) once for each group to reduce
     # the number of #find's in multi-model searches.
     #
+
+    def instances_from_attributes_and_class(klass, matches)
+      index_options = klass.sphinx_index_options
+
+      ids = matches.collect { |match| match[:attributes]["sphinx_internal_id"] }
+      if ids.length > 0
+        has_id_attr = matches.first[:attributes].has_key?("#{klass.name.downcase}_id")
+        valid_attrs = matches.first[:attributes].keys.select { |key| klass.method_defined?("#{key}=") }
+
+        instances = matches.map do |match|
+          instance = klass.new
+
+          valid_attrs.each do |attr_name|
+            begin
+              instance.send("#{attr_name}=", match[:attributes][attr_name])
+            rescue => e
+              binding.pry
+            end
+          end
+
+          instance
+        end
+
+        binding.pry
+      end
+
+      # Raise an exception if we find records in Sphinx but not in the DB, so
+      # the search method can retry without them. See
+      # ThinkingSphinx::Search.retry_search_on_stale_index.
+      if options[:raise_on_stale] && instances.length < ids.length
+        stale_ids = ids - instances.map { |i| i.id }
+        raise StaleIdsException, stale_ids
+      end
+
+      # if the user has specified an SQL order, return the collection
+      # without rearranging it into the Sphinx order
+      return instances if (options[:sql_order] || index_options[:sql_order])
+
+      ids.collect { |obj_id|
+        instances.detect do |obj|
+          obj.primary_key_for_sphinx == obj_id
+        end
+      }
+    end
+
+    def instances_from_attributes
+      return single_class_attribute_results if one_class
+
+      groups = results[:matches].group_by { |match|
+        match[:attributes][crc_attribute]
+      }
+      groups.each do |crc, group|
+        group.replace(
+          instances_from_class(class_from_crc(crc), group)
+        )
+      end
+
+      results[:matches].collect do |match|
+        groups.detect { |crc, group|
+          crc == match[:attributes][crc_attribute]
+        }[1].compact.detect { |obj|
+          obj.primary_key_for_sphinx == match[:attributes]["sphinx_internal_id"]
+        }
+      end
+    end
+
+    def single_class_attribute_results
+      instances_from_attributes_and_class one_class, results[:matches]
+    end
+
     def instances_from_matches
       return single_class_results if one_class
 
