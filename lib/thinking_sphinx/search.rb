@@ -958,37 +958,26 @@ module ThinkingSphinx
 
       ids = matches.collect { |match| match[:attributes]["sphinx_internal_id"] }
       if ids.length > 0
-        has_id_attr = matches.first[:attributes].has_key?("#{klass.name.downcase}_id")
-        valid_attrs = matches.first[:attributes].keys.select { |key| klass.method_defined?("#{key}=") }
+        valid_attrs = matches.first[:attributes].keys.select do |key|
+          klass.column_names.include?(key) ||
+            klass.reflect_on_all_associations.map do |association|
+              association.name.to_s
+            end.include?(key)
+        end
 
-        instances = matches.map do |match|
-          instance = klass.new
+        instances = matches.each_with_index.map do |match, i|
+          instance = klass.new { |k| k.id = ids[i] }
 
           valid_attrs.each do |attr_name|
             begin
               instance.send("#{attr_name}=", match[:attributes][attr_name])
             rescue => e
-              binding.pry
             end
           end
 
           instance
         end
-
-        binding.pry
       end
-
-      # Raise an exception if we find records in Sphinx but not in the DB, so
-      # the search method can retry without them. See
-      # ThinkingSphinx::Search.retry_search_on_stale_index.
-      if options[:raise_on_stale] && instances.length < ids.length
-        stale_ids = ids - instances.map { |i| i.id }
-        raise StaleIdsException, stale_ids
-      end
-
-      # if the user has specified an SQL order, return the collection
-      # without rearranging it into the Sphinx order
-      return instances if (options[:sql_order] || index_options[:sql_order])
 
       ids.collect { |obj_id|
         instances.detect do |obj|
@@ -1005,7 +994,7 @@ module ThinkingSphinx
       }
       groups.each do |crc, group|
         group.replace(
-          instances_from_class(class_from_crc(crc), group)
+          instances_from_attributes_and_class(class_from_crc(crc), group)
         )
       end
 
@@ -1019,7 +1008,7 @@ module ThinkingSphinx
     end
 
     def single_class_attribute_results
-      instances_from_attributes_and_class one_class, results[:matches]
+      instances_from_attributes_and_class(one_class, results[:matches])
     end
 
     def instances_from_matches
